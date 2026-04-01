@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  # Automated Market Monitor Service
+  market-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tradewizard-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - tradewizard-network
+    volumes:
+      # Mount logs directory for persistence
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Local Supabase for development/testing
+  # Uncomment if you want to run Supabase locally instead of using cloud
+  # supabase-db:
+  #   image: supabase/postgres:15.1.0.117
+  #   container_name: tradewizard-db
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_PASSWORD: your-super-secret-password
+  #     POSTGRES_DB: tradewizard
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - tradewizard-network
+
+networks:
+  tradewizard-network:
+    driver: bridge
+
+volumes:
+  # postgres-data:
+  logs:

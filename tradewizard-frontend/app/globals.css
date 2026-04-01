@@ -1,0 +1,140 @@
+@import "tailwindcss";
+@import "../styles/mobile-optimizations.css";
+@import "../styles/mobile-text-readability.css";
+
+:root {
+  /* Core Base Colors */
+  --background: #0A0A0B;
+  --foreground: #EDEDED;
+  
+  /* Surface / Cards */
+  --card-bg: rgba(23, 23, 23, 0.6);
+  --card-border: rgba(255, 255, 255, 0.08);
+  
+  /* Primary Brand - Magical Purple/Indigo */
+  --primary: #6366F1;
+  --primary-foreground: #FFFFFF;
+  
+  /* Accents */
+  --accent-glow: #818CF8;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+  /* Mobile scroll optimization */
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Background Gradients/Mesh */
+body::before {
+  content: "";
+  position: fixed;
+  top: -20%;
+  left: -10%;
+  width: 50%;
+  height: 50%;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, rgba(0, 0, 0, 0) 70%);
+  filter: blur(100px);
+  z-index: -1;
+  pointer-events: none;
+  /* Optimize for mobile */
+  will-change: transform;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  bottom: -20%;
+  right: -10%;
+  width: 60%;
+  height: 60%;
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.1) 0%, rgba(0, 0, 0, 0) 70%);
+  filter: blur(100px);
+  z-index: -1;
+  pointer-events: none;
+  /* Optimize for mobile */
+  will-change: transform;
+}
+
+/* Custom Scrollbar Styles */
+.scrollbar-custom {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, 0.6) rgba(255, 255, 255, 0.05);
+}
+
+.scrollbar-custom::-webkit-scrollbar {
+  height: 6px; /* Horizontal scrollbar */
+  width: 6px;  /* Vertical scrollbar */
+}
+
+.scrollbar-custom::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  margin: 2px;
+}
+
+.scrollbar-custom::-webkit-scrollbar-thumb {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.7) 0%, rgba(167, 139, 250, 0.7) 100%);
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.4);
+  transition: all 0.2s ease;
+}
+
+.scrollbar-custom::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.9) 0%, rgba(167, 139, 250, 0.9) 100%);
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.6);
+  cursor: grab;
+}
+
+.scrollbar-custom::-webkit-scrollbar-thumb:active {
+  cursor: grabbing;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 1) 0%, rgba(167, 139, 250, 1) 100%);
+}
+
+/* Corner where scrollbars meet */
+.scrollbar-custom::-webkit-scrollbar-corner {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Hide scrollbar utility for mobile horizontal scrolling */
+.no-scrollbar {
+  -ms-overflow-style: none;  /* Internet Explorer 10+ */
+  scrollbar-width: none;  /* Firefox */
+}
+
+.no-scrollbar::-webkit-scrollbar { 
+  display: none;  /* Safari and Chrome */
+}
+
+/* Screen Reader Only - Accessibility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Focus visible for keyboard navigation */
+.focus-visible:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}

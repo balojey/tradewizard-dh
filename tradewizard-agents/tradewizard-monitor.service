@@ -1,0 +1,49 @@
+[Unit]
+Description=TradeWizard Automated Market Monitor
+Documentation=https://github.com/balojey/tradewizard
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradewizard
+Group=tradewizard
+WorkingDirectory=/opt/tradewizard-agents
+
+# Start the monitor service
+ExecStart=/usr/bin/node /opt/tradewizard-agents/dist/monitor.js
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=200
+StartLimitBurst=5
+
+# Environment
+Environment="NODE_ENV=production"
+EnvironmentFile=/opt/tradewizard-agents/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tradewizard-monitor
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tradewizard-agents/logs
+
+# Resource limits
+LimitNOFILE=65536
+MemoryLimit=1G
+CPUQuota=200%
+
+# Graceful shutdown
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
