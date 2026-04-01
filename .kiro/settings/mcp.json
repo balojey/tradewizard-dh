@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "Railway": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@railway/mcp-server"
+      ]
+    },
+    "magic-link-docs": {
+      "url": "https://docs.magic.link/mcp",
+      "disabled": false
+    },
+    "polymarket-docs": {
+      "url": "https://docs.polymarket.com/mcp",
+      "disabled": false,
+      "autoApprove": [
+        "SearchPolymarketDocumentation"
+      ]
+    },
+    "ranger-docs": {
+      "url": "https://docs.ranger.finance/mcp",
+      "disabled": false,
+      "autoApprove": [
+        "search_ranger_earn_documentation"
+      ]
+    }
+  }
+}
