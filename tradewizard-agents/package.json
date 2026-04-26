@@ -35,7 +35,8 @@
     "docker:build": "docker build -t tradewizard-monitor .",
     "docker:run": "docker-compose up -d",
     "docker:stop": "docker-compose down",
-    "docker:logs": "docker-compose logs -f market-monitor"
+    "docker:logs": "docker-compose logs -f market-monitor",
+    "postinstall": "bash scripts/patch-langchain-aws.sh"
   },
   "keywords": [
     "prediction-markets",

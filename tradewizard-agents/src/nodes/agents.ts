@@ -99,7 +99,7 @@ Your analysis should show thoughtful evolution over time, not random fluctuation
 
     // Attempt LLM invocation with retry logic for invalid structured output
     let lastError: Error | null = null;
-    const maxAttempts = 2; // Initial attempt + 1 retry
+    const maxAttempts = 3; // Initial attempt + 2 retries
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {

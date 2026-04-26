@@ -12,8 +12,7 @@
  */
 
 import { ChatBedrockConverse } from '@langchain/aws';
-import { AIMessage, type BaseMessage } from '@langchain/core/messages';
-import { Runnable } from '@langchain/core/runnables';
+import { SafeChatBedrockConverse } from './bedrock-message-filter.js';
 
 /**
  * Configuration for Nova model instantiation
@@ -52,48 +51,6 @@ export interface NovaModelVariant {
   outputCostPer1kTokens: number;
   /** Maximum supported tokens */
   maxTokens: number;
-}
-
-/**
- * Filter empty text content blocks from AI messages.
- * 
- * Nova models sometimes return AI messages containing empty text blocks (`{"text": ""}`).
- * The @langchain/aws library's `convertAIMessageToConverseMessage` rejects these as
- * "Unsupported content block type" when serializing back to the Converse API on subsequent
- * calls in an agentic loop. This filter strips them out before they poison message history.
- * 
- * @param messages - Array of messages to sanitize
- * @returns Sanitized messages with empty text blocks removed
- */
-export function filterEmptyContentBlocks(messages: BaseMessage[]): BaseMessage[] {
-  return messages.map((msg) => {
-    if (msg instanceof AIMessage && Array.isArray(msg.content)) {
-      const filtered = msg.content.filter((block) => {
-        if (typeof block === 'object' && 'type' in block && block.type === 'text') {
-          return typeof block.text === 'string' && block.text.trim().length > 0;
-        }
-        return true;
-      });
-
-      // If all content blocks were empty text, keep the original to avoid
-      // breaking downstream expectations of non-empty content
-      if (filtered.length === 0) {
-        return msg;
-      }
-
-      // Only create a new message if we actually filtered something
-      if (filtered.length !== msg.content.length) {
-        return new AIMessage({
-          content: filtered,
-          tool_calls: msg.tool_calls,
-          additional_kwargs: msg.additional_kwargs,
-          response_metadata: msg.response_metadata,
-          id: msg.id,
-        });
-      }
-    }
-    return msg;
-  });
 }
 
 /**
@@ -165,15 +122,25 @@ export class BedrockClient {
    * 
    * @returns ChatBedrockConverse instance configured for the specified Nova model
    */
+  /**
+   * Create a LangChain-compatible chat model instance for Nova
+   * 
+   * Uses SafeChatBedrockConverse which supports tool calling for Nova models
+   * via the Bedrock Converse API and automatically filters empty text content
+   * blocks that Nova sometimes returns.
+   * 
+   * @returns SafeChatBedrockConverse instance configured for the specified Nova model
+   */
   createChatModel(): ChatBedrockConverse {
-    return new ChatBedrockConverse(this.buildModelConfig());
+    return new SafeChatBedrockConverse(this.buildModelConfig());
   }
 
   /**
-   * Create a ChatBedrockConverse instance with built-in retry logic.
+   * Create a SafeChatBedrockConverse instance with built-in retry logic.
    * 
-   * Wraps the model with LangChain's `.withRetry()` so transient Bedrock errors
-   * (throttling, empty content blocks, network blips) are retried automatically.
+   * Note: The returned Runnable supports `.invoke()` and `.stream()` with retry,
+   * but does NOT support `.bindTools()`. Use `createChatModel()` instead when
+   * the LLM will be passed to `createReactAgent` or other tool-binding APIs.
    * 
    * @param retryConfig - Optional retry configuration override
    * @returns A Runnable that retries on failure (up to 3 attempts by default)
@@ -181,7 +148,7 @@ export class BedrockClient {
   createChatModelWithRetry(
     retryConfig: { stopAfterAttempt?: number } = {}
   ): ChatBedrockConverse {
-    const model = new ChatBedrockConverse(this.buildModelConfig());
+    const model = new SafeChatBedrockConverse(this.buildModelConfig());
     return model.withRetry({
       ...DEFAULT_LLM_RETRY_CONFIG,
       ...retryConfig,

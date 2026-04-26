@@ -198,6 +198,11 @@ export class DatabasePersistenceImpl implements DatabasePersistence {
         const client = this.clientManager.getClient();
         const normalizedMarketId = this.normalizeMarketId(marketId);
 
+      // For NO_TRADE recommendations, set zone values to null to avoid
+      // violating the check_stop_loss_below_entry constraint (stop_loss < entry_zone_min
+      // fails when both are 0)
+      const isNoTrade = recommendation.action === 'NO_TRADE';
+
       const insertData: TablesInsert<'recommendations'> = {
         market_id: normalizedMarketId,
         direction: recommendation.action,
@@ -205,11 +210,11 @@ export class DatabasePersistenceImpl implements DatabasePersistence {
         market_edge: recommendation.metadata.edge,
         expected_value: recommendation.expectedValue,
         confidence: this.mapConfidenceLevel(recommendation.metadata.confidenceBand),
-        entry_zone_min: recommendation.entryZone[0],
-        entry_zone_max: recommendation.entryZone[1],
-        target_zone_min: recommendation.targetZone[0],
-        target_zone_max: recommendation.targetZone[1],
-        stop_loss: recommendation.stopLoss,
+        entry_zone_min: isNoTrade ? null : recommendation.entryZone[0],
+        entry_zone_max: isNoTrade ? null : recommendation.entryZone[1],
+        target_zone_min: isNoTrade ? null : recommendation.targetZone[0],
+        target_zone_max: isNoTrade ? null : recommendation.targetZone[1],
+        stop_loss: isNoTrade ? null : recommendation.stopLoss,
         explanation: recommendation.explanation.summary,
         core_thesis: recommendation.explanation.coreThesis,
         catalysts: recommendation.explanation.keyCatalysts,

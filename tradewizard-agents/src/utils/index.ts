@@ -130,3 +130,4 @@ export {
   type EvolutionEvent,
   type EvolutionEventType,
 } from './evolution-tracker.js';
+export { filterEmptyContentBlocks, SafeChatBedrockConverse, withEmptyBlockFilter } from './bedrock-message-filter.js';
