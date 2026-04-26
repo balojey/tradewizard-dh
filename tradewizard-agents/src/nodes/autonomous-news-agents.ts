@@ -543,7 +543,7 @@ Use the available tools to gather additional news data as needed, then provide y
         });
 
         const agentPromise = agent.invoke(input, {
-          recursionLimit: maxToolCalls + 10, // Allow some extra for agent reasoning
+          recursionLimit: maxToolCalls * 5 + 20, // Each ReAct cycle uses ~5 steps; add headroom for synthesis
         });
 
         result = await Promise.race([agentPromise, timeoutPromise]);

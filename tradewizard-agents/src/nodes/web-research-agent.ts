@@ -226,6 +226,7 @@ export function createWebResearchAgentNode(
         // Return low-confidence neutral signal (Requirement 8.3)
         const signal: AgentSignal = {
           agentName,
+          timestamp: Date.now(),
           confidence: 0.1,
           direction: 'NEUTRAL',
           fairProbability: 0.5,
@@ -309,9 +310,9 @@ export function createWebResearchAgentNode(
             content: `Analyze this prediction market and gather comprehensive web research:
 
 Market Question: ${state.mbd.question}
-Market Description: ${state.mbd.description || 'N/A'}
-Market Category: ${state.mbd.category || 'N/A'}
-Market Tags: ${state.mbd.tags?.join(', ') || 'N/A'}
+Resolution Criteria: ${state.mbd.resolutionCriteria || 'N/A'}
+Event Context: ${state.mbd.eventContext?.eventTitle || 'N/A'}
+Keywords: ${state.mbd.keywords?.join(', ') || 'N/A'}
 
 Please search the web and scrape relevant sources to provide comprehensive context about this market.`,
           },
@@ -322,9 +323,16 @@ Please search the web and scrape relevant sources to provide comprehensive conte
       const maxToolCalls = config.webResearch?.maxToolCalls || 8;
       const timeout = config.webResearch?.timeout || 60000;
 
+      // Each ReAct cycle involves multiple internal graph steps:
+      //   system message → LLM reasoning → tool call → tool result → LLM reasoning
+      // So each tool call consumes ~5 recursion steps. Add headroom for the
+      // final synthesis step where the agent writes its JSON output.
+      // Mirrors the Python DOA implementation: max_tool_calls * 5 + 20
+      const recursionLimit = maxToolCalls * 5 + 20;
+
       const agentResult = await Promise.race([
         agent.invoke(agentInput, {
-          recursionLimit: maxToolCalls + 5, // Allow for reasoning steps
+          recursionLimit,
         }),
         new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Agent timeout')), timeout)
@@ -336,53 +344,62 @@ Please search the web and scrape relevant sources to provide comprehensive conte
       const agentOutput = finalMessage.content;
 
       // Step 13: Parse agent output as signal (Requirement 5.12)
-      let signal: AgentSignal;
+      let signal: AgentSignal | undefined;
+
+      // Try direct JSON parse first
       try {
-        // Try direct JSON parse first
         signal = JSON.parse(agentOutput);
       } catch {
-        // Try to extract JSON from markdown code blocks or find JSON in text
-        let jsonMatch = agentOutput.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-        if (jsonMatch) {
+        // Not direct JSON, try extracting from markdown code blocks
+      }
+
+      if (!signal) {
+        const codeBlockMatch = agentOutput.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+        if (codeBlockMatch) {
           try {
-            signal = JSON.parse(jsonMatch[1]);
+            signal = JSON.parse(codeBlockMatch[1]);
           } catch {
-            jsonMatch = null;
+            // Not valid JSON in code block
           }
-        }
-        
-        if (!jsonMatch) {
-          // Try to find JSON object in the text
-          jsonMatch = agentOutput.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            try {
-              signal = JSON.parse(jsonMatch[0]);
-            } catch {
-              jsonMatch = null;
-            }
-          }
-        }
-        
-        // If we still couldn't parse JSON, create fallback signal
-        if (!jsonMatch) {
-          console.warn(`[${agentName}] Failed to parse JSON output, using fallback`);
-          const truncatedOutput = agentOutput.length > 500 
-            ? agentOutput.substring(0, 500) + '...' 
-            : agentOutput;
-          signal = {
-            agentName,
-            confidence: 0.5,
-            direction: 'NEUTRAL',
-            fairProbability: 0.5,
-            keyDrivers: [truncatedOutput],
-            riskFactors: [],  // Empty array instead of error message
-            metadata: {
-              parseError: true,
-              rawOutputLength: agentOutput.length,
-            },
-          };
         }
       }
+
+      if (!signal) {
+        // Try to find a JSON object anywhere in the text
+        const jsonMatch = agentOutput.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            signal = JSON.parse(jsonMatch[0]);
+          } catch {
+            // Not valid JSON
+          }
+        }
+      }
+
+      // If we still couldn't parse JSON, create fallback signal
+      if (!signal) {
+        console.warn(`[${agentName}] Failed to parse JSON output, using fallback`);
+        const truncatedOutput = agentOutput.length > 500
+          ? agentOutput.substring(0, 500) + '...'
+          : agentOutput;
+        signal = {
+          agentName,
+          timestamp: Date.now(),
+          confidence: 0.5,
+          direction: 'NEUTRAL' as const,
+          fairProbability: 0.5,
+          keyDrivers: [truncatedOutput],
+          riskFactors: [],
+          metadata: {
+            parseError: true,
+            rawOutputLength: agentOutput.length,
+          },
+        };
+      }
+
+      // Ensure required fields
+      signal.agentName = agentName;
+      signal.timestamp = signal.timestamp || Date.now();
 
       // Step 14: Add tool usage metadata (Requirement 5.13)
       const toolUsage = getToolUsageSummary(toolAuditLog);
@@ -412,12 +429,120 @@ Please search the web and scrape relevant sources to provide comprehensive conte
         ],
       };
     } catch (error) {
-      // Step 16: Error handling (Requirement 8.1-8.11)
-      console.error(`[${agentName}] Error:`, error);
+      // Step 16: Error handling with research salvage (Requirement 8.1-8.11)
+      // When the agent hits recursion limit, timeout, or other errors AFTER
+      // making tool calls, we salvage the gathered research from the tool
+      // audit log instead of discarding it.
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isTimeout = errorMessage === 'Agent timeout';
+      const isRecursionLimit = errorMessage.includes('Recursion limit') ||
+        (error as any)?.lc_error_code === 'GRAPH_RECURSION_LIMIT';
 
-      // Check if it's a timeout error (Requirement 8.2)
-      const isTimeout = error instanceof Error && error.message === 'Agent timeout';
+      console.error(`[${agentName}] Error: ${errorMessage}`);
 
+      // Check if we have any successful tool results to salvage
+      const successfulTools = toolAuditLog.filter(entry => entry.result && !entry.error);
+      const toolUsage = toolAuditLog.length > 0 ? getToolUsageSummary(toolAuditLog) : undefined;
+
+      if (successfulTools.length > 0) {
+        console.log(`[${agentName}] Salvaging research from ${successfulTools.length} successful tool calls`);
+
+        // Extract search results and scraped content from audit log
+        const keyDrivers: string[] = [];
+        const scrapedUrls: string[] = [];
+        const searchQueries: string[] = [];
+        let totalArticles = 0;
+
+        for (const entry of successfulTools) {
+          if (entry.toolName === 'search_web' && entry.result) {
+            const results = Array.isArray(entry.result) ? entry.result : [];
+            searchQueries.push(entry.params?.query || 'unknown query');
+            totalArticles += results.length;
+
+            // Extract top search result snippets as key drivers
+            for (const r of results.slice(0, 3)) {
+              const title = r.title || '';
+              const snippet = r.snippet || '';
+              const link = r.link || '';
+              if (title && snippet) {
+                keyDrivers.push(
+                  `${title}: ${snippet}${link ? ` (${link})` : ''}`
+                );
+              }
+            }
+          } else if (entry.toolName === 'scrape_webpage' && entry.result) {
+            const scraped = entry.result as any;
+            scrapedUrls.push(entry.params?.url || 'unknown URL');
+
+            // Extract key content from scraped pages
+            if (scraped.title && scraped.text) {
+              const excerpt = scraped.text.length > 300
+                ? scraped.text.substring(0, 300) + '...'
+                : scraped.text;
+              keyDrivers.push(
+                `From ${scraped.title} (${entry.params?.url || ''}): ${excerpt}`
+              );
+            }
+          }
+        }
+
+        // Build a salvaged signal with the gathered research
+        const failedTools = toolAuditLog.filter(entry => entry.error);
+        const confidenceReduction = failedTools.length > 0 ? 0.15 : 0;
+        const baseConfidence = Math.min(0.7, 0.3 + (successfulTools.length * 0.1));
+
+        const signal: AgentSignal = {
+          agentName,
+          timestamp: Date.now(),
+          confidence: Math.max(0.2, baseConfidence - confidenceReduction),
+          direction: 'NEUTRAL',
+          fairProbability: 0.5,
+          keyDrivers: keyDrivers.length > 0
+            ? keyDrivers.slice(0, 7)
+            : ['Web research gathered partial results before agent error'],
+          riskFactors: [
+            `Agent terminated early: ${isRecursionLimit ? 'recursion limit reached' : isTimeout ? 'execution timeout' : errorMessage}`,
+            `Research based on ${successfulTools.length} successful tool calls (${failedTools.length} failed)`,
+            ...(failedTools.length > 0
+              ? [`Tool failures: ${failedTools.map(f => `${f.toolName}: ${f.error}`).join('; ')}`]
+              : []),
+            'Analysis may be incomplete — agent could not synthesize final report',
+          ],
+          metadata: {
+            salvaged: true,
+            errorType: isRecursionLimit ? 'recursion_limit' : isTimeout ? 'timeout' : 'execution_error',
+            originalError: errorMessage,
+            sourceCount: totalArticles + scrapedUrls.length,
+            searchQueriesUsed: searchQueries,
+            urlsScraped: scrapedUrls,
+            ...(toolUsage || {}),
+          },
+        };
+
+        return {
+          agentSignals: [signal],
+          auditLog: [
+            {
+              stage: `agent_${agentName}`,
+              timestamp: Date.now(),
+              data: {
+                agentName,
+                success: true,
+                salvaged: true,
+                error: errorMessage,
+                isTimeout,
+                isRecursionLimit,
+                duration: Date.now() - startTime,
+                toolUsage,
+                salvagedToolCalls: successfulTools.length,
+                failedToolCalls: failedTools.length,
+              },
+            },
+          ],
+        };
+      }
+
+      // No tool results to salvage — return error as before
       return {
         agentErrors: [
           {
@@ -433,10 +558,10 @@ Please search the web and scrape relevant sources to provide comprehensive conte
             data: {
               agentName,
               success: false,
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage,
               isTimeout,
               duration: Date.now() - startTime,
-              toolUsage: toolAuditLog.length > 0 ? getToolUsageSummary(toolAuditLog) : undefined,
+              toolUsage,
             },
           },
         ],
