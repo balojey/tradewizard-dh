@@ -26,10 +26,11 @@ RUN apk add --no-cache dumb-init curl
 
 WORKDIR /app
 
-# Copy package files
+# Copy package files and postinstall patch script
 COPY package*.json ./
+COPY scripts/patch-langchain-aws.sh ./scripts/
 
-# Install only production dependencies
+# Install only production dependencies (postinstall applies @langchain/aws patch)
 RUN npm install --omit=dev --legacy-peer-deps
 
 # Copy built application from builder

@@ -36,7 +36,7 @@
     "docker:run": "docker-compose up -d",
     "docker:stop": "docker-compose down",
     "docker:logs": "docker-compose logs -f market-monitor",
-    "postinstall": "bash scripts/patch-langchain-aws.sh"
+    "postinstall": "sh scripts/patch-langchain-aws.sh"
   },
   "keywords": [
     "prediction-markets",

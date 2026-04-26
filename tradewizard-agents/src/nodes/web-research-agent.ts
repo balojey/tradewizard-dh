@@ -286,9 +286,9 @@ export function createWebResearchAgentNode(
 
       // Step 7: Create web research tools (Requirement 3.1, 3.2)
       const tools: DynamicStructuredTool[] = [
-        createSearchWebTool(toolContext) as any,
-        createScrapeWebpageTool(toolContext) as any,
-      ];
+        createSearchWebTool(toolContext),
+        createScrapeWebpageTool(toolContext),
+      ] as DynamicStructuredTool[];
 
       // Step 8: Create LLM instance (Requirement 4.2)
       // Use Google as primary, with fallbacks to other providers

@@ -246,6 +246,7 @@ tar -czf tradewizard-deploy.tar.gz \
     package-lock.json \
     Dockerfile \
     docker-compose.yml \
+    scripts/ \
     src/ \
     .env.production
 

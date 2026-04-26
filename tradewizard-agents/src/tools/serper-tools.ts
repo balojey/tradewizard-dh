@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod';
+import { tool } from '@langchain/core/tools';
 import type { SerperClient, SerperSearchResult, SerperScrapeResponse } from '../utils/serper-client.js';
 import type { ToolCache } from '../utils/tool-cache.js';
 
@@ -73,8 +74,7 @@ export const SearchWebInputSchema = z.object({
     .min(1)
     .max(20)
     .optional()
-    .default(10)
-    .describe('Number of results to return (1-20)'),
+    .describe('Number of results to return (1-20, defaults to 10 if not specified)'),
   timeRange: z
     .enum(['hour', 'day', 'week', 'month', 'year', 'all'])
     .optional()
@@ -87,7 +87,7 @@ export type SearchWebInput = z.infer<typeof SearchWebInputSchema>;
  * Input schema for scrape_webpage tool
  */
 export const ScrapeWebpageInputSchema = z.object({
-  url: z.string().url().describe('URL to scrape'),
+  url: z.string().describe('Full URL to scrape (must be a valid http or https URL)'),
 });
 
 export type ScrapeWebpageInput = z.infer<typeof ScrapeWebpageInputSchema>;
@@ -398,29 +398,8 @@ export async function scrapeWebpage(
  * Requirements: 3.1
  */
 export function createSearchWebTool(context: ToolContext) {
-  return {
-    name: 'search_web',
-    description: `Search the web for information using Google search.
-
-Use this tool to:
-- Find recent news and articles about market subjects
-- Gather background information on events, people, or organizations
-- Discover current developments and breaking news
-- Identify authoritative sources for deeper research
-
-Parameters:
-- query: Search query string (required)
-- numResults: Number of results (1-20, default: 10)
-- timeRange: Filter by time - 'hour', 'day', 'week', 'month', 'year', or 'all'
-
-Returns: Array of search results with title, link, snippet, and date.
-
-Example usage:
-- Recent news: { query: "Ukraine conflict latest", timeRange: "day" }
-- Background: { query: "candidate biography policy positions" }
-- Breaking news: { query: "Federal Reserve announcement", timeRange: "hour" }`,
-    schema: SearchWebInputSchema,
-    func: async (input: SearchWebInput) => {
+  return tool(
+    async (input: SearchWebInput) => {
       const result = await searchWeb(input, context);
 
       if (isToolError(result)) {
@@ -436,7 +415,12 @@ Example usage:
         results: result,
       });
     },
-  };
+    {
+      name: 'search_web',
+      description: 'Search the web for information using Google search. Use this to find recent news, background information, current developments, and authoritative sources. Parameters: query (required string), numResults (optional number 1-20), timeRange (optional: hour, day, week, month, year, all).',
+      schema: SearchWebInputSchema,
+    }
+  );
 }
 
 /**
@@ -445,29 +429,8 @@ Example usage:
  * Requirements: 3.2
  */
 export function createScrapeWebpageTool(context: ToolContext) {
-  return {
-    name: 'scrape_webpage',
-    description: `Extract full content from a webpage URL.
-
-Use this tool to:
-- Get complete article text from news URLs
-- Extract detailed information from authoritative sources
-- Read full policy documents or official statements
-- Gather comprehensive context from specific pages
-
-Parameters:
-- url: Full URL to scrape (required, must be valid URL)
-
-Returns: Webpage content including title, full text, and metadata.
-
-Example usage:
-- News article: { url: "https://example.com/article" }
-- Official document: { url: "https://gov.example.com/policy" }
-- Research paper: { url: "https://journal.example.com/paper" }
-
-Note: Only scrape URLs from search results or known authoritative sources.`,
-    schema: ScrapeWebpageInputSchema,
-    func: async (input: ScrapeWebpageInput) => {
+  return tool(
+    async (input: ScrapeWebpageInput) => {
       const result = await scrapeWebpage(input, context);
 
       if (isToolError(result)) {
@@ -486,5 +449,10 @@ Note: Only scrape URLs from search results or known authoritative sources.`,
         metadata: result.metadata,
       });
     },
-  };
+    {
+      name: 'scrape_webpage',
+      description: 'Extract full content from a webpage URL. Use this to get complete article text from news URLs, official documents, or authoritative sources. Parameters: url (required string, must be a valid http or https URL).',
+      schema: ScrapeWebpageInputSchema,
+    }
+  );
 }
