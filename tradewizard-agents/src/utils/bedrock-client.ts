@@ -6,9 +6,14 @@
  * 
  * Note: Uses ChatBedrockConverse (Converse API) instead of BedrockChat (InvokeModel API)
  * because Nova models only support tool calling through the Converse API.
+ * 
+ * Includes defensive handling for empty text content blocks returned by Nova models,
+ * which can cause "Unsupported content block type" errors in @langchain/aws message conversion.
  */
 
 import { ChatBedrockConverse } from '@langchain/aws';
+import { AIMessage, type BaseMessage } from '@langchain/core/messages';
+import { Runnable } from '@langchain/core/runnables';
 
 /**
  * Configuration for Nova model instantiation
@@ -50,6 +55,61 @@ export interface NovaModelVariant {
 }
 
 /**
+ * Filter empty text content blocks from AI messages.
+ * 
+ * Nova models sometimes return AI messages containing empty text blocks (`{"text": ""}`).
+ * The @langchain/aws library's `convertAIMessageToConverseMessage` rejects these as
+ * "Unsupported content block type" when serializing back to the Converse API on subsequent
+ * calls in an agentic loop. This filter strips them out before they poison message history.
+ * 
+ * @param messages - Array of messages to sanitize
+ * @returns Sanitized messages with empty text blocks removed
+ */
+export function filterEmptyContentBlocks(messages: BaseMessage[]): BaseMessage[] {
+  return messages.map((msg) => {
+    if (msg instanceof AIMessage && Array.isArray(msg.content)) {
+      const filtered = msg.content.filter((block) => {
+        if (typeof block === 'object' && 'type' in block && block.type === 'text') {
+          return typeof block.text === 'string' && block.text.trim().length > 0;
+        }
+        return true;
+      });
+
+      // If all content blocks were empty text, keep the original to avoid
+      // breaking downstream expectations of non-empty content
+      if (filtered.length === 0) {
+        return msg;
+      }
+
+      // Only create a new message if we actually filtered something
+      if (filtered.length !== msg.content.length) {
+        return new AIMessage({
+          content: filtered,
+          tool_calls: msg.tool_calls,
+          additional_kwargs: msg.additional_kwargs,
+          response_metadata: msg.response_metadata,
+          id: msg.id,
+        });
+      }
+    }
+    return msg;
+  });
+}
+
+/**
+ * Default retry configuration for Bedrock LLM calls
+ */
+const DEFAULT_LLM_RETRY_CONFIG = {
+  stopAfterAttempt: 3,
+  onFailedAttempt: (error: any) => {
+    const msg = error?.message || String(error);
+    console.warn(
+      `[BedrockClient] LLM call failed (attempt ${error?.attemptNumber ?? '?'}): ${msg}`
+    );
+  },
+};
+
+/**
  * AWS Bedrock client for Nova model management
  */
 export class BedrockClient {
@@ -68,28 +128,17 @@ export class BedrockClient {
   }
 
   /**
-   * Create a LangChain-compatible chat model instance for Nova
-   * 
-   * Uses ChatBedrockConverse which supports tool calling for Nova models
-   * via the Bedrock Converse API.
-   * 
-   * @returns ChatBedrockConverse instance configured for the specified Nova model
+   * Build the common model configuration object
    */
-  createChatModel(): ChatBedrockConverse {
-    // Handle Nova 2 models with 'global.' prefix
-    // ChatBedrockConverse expects format like 'amazon.nova-2-lite-v1:0' not 'global.amazon.nova-2-lite-v1:0'
-    let modelId = this.config.modelId;
-    if (modelId.startsWith('global.')) {
-      modelId = modelId.replace('global.', '');
-    }
-
-    const modelConfig: any = {
-      model: modelId,
+  private buildModelConfig(): Record<string, any> {
+    // Nova 2 models require inference profile IDs (e.g., 'global.amazon.nova-2-lite-v1:0')
+    // The 'global.' prefix is the cross-region inference profile — pass it through as-is
+    const modelConfig: Record<string, any> = {
+      model: this.config.modelId,
       region: this.config.region,
       temperature: this.config.temperature ?? 0.7,
     };
 
-    // Add optional parameters if specified
     if (this.config.maxTokens !== undefined) {
       modelConfig.maxTokens = this.config.maxTokens;
     }
@@ -98,7 +147,6 @@ export class BedrockClient {
       modelConfig.topP = this.config.topP;
     }
 
-    // Add credentials if explicitly provided
     if (this.config.credentials) {
       modelConfig.credentials = {
         accessKeyId: this.config.credentials.accessKeyId,
@@ -106,7 +154,38 @@ export class BedrockClient {
       };
     }
 
-    return new ChatBedrockConverse(modelConfig);
+    return modelConfig;
+  }
+
+  /**
+   * Create a LangChain-compatible chat model instance for Nova
+   * 
+   * Uses ChatBedrockConverse which supports tool calling for Nova models
+   * via the Bedrock Converse API.
+   * 
+   * @returns ChatBedrockConverse instance configured for the specified Nova model
+   */
+  createChatModel(): ChatBedrockConverse {
+    return new ChatBedrockConverse(this.buildModelConfig());
+  }
+
+  /**
+   * Create a ChatBedrockConverse instance with built-in retry logic.
+   * 
+   * Wraps the model with LangChain's `.withRetry()` so transient Bedrock errors
+   * (throttling, empty content blocks, network blips) are retried automatically.
+   * 
+   * @param retryConfig - Optional retry configuration override
+   * @returns A Runnable that retries on failure (up to 3 attempts by default)
+   */
+  createChatModelWithRetry(
+    retryConfig: { stopAfterAttempt?: number } = {}
+  ): ChatBedrockConverse {
+    const model = new ChatBedrockConverse(this.buildModelConfig());
+    return model.withRetry({
+      ...DEFAULT_LLM_RETRY_CONFIG,
+      ...retryConfig,
+    }) as unknown as ChatBedrockConverse;
   }
 
   /**
