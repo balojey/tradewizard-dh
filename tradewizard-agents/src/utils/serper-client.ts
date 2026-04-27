@@ -7,6 +7,22 @@
  * Follows the same pattern as NewsData API client for consistency.
  */
 
+// ============================================================================
+// Error Types
+// ============================================================================
+
+/**
+ * Thrown when all configured API keys fail with authentication errors
+ * (401/402/403). This is NOT caught by the retry loop so the caller
+ * gets a clear diagnostic instead of silent empty data.
+ */
+export class SerperAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SerperAuthError';
+  }
+}
+
 // Key State Management
 export interface KeyState {
   key: string;                    // Full API key
@@ -166,7 +182,16 @@ export class SerperClient {
   }
   
   /**
-   * Execute API request with retry and key rotation
+   * Execute API request with retry and key rotation.
+   *
+   * Mirrors the Python DOA `_execute_request` implementation:
+   * - Blocking errors (401/402/403/429) trigger key rotation without counting
+   *   as a retry attempt.
+   * - Non-blocking errors (5xx, network) use exponential backoff retries.
+   * - Auth errors (401/402/403) that exhaust all keys throw immediately so
+   *   the caller gets a clear diagnostic instead of silent empty data.
+   * - Rate-limit exhaustion (429 on all keys) returns graceful degradation.
+   * - ValueError (response parse failures) are re-raised immediately.
    */
   private async executeRequest<T>(
     url: string,
@@ -178,11 +203,11 @@ export class SerperClient {
     
     while (attempt < this.config.retryAttempts!) {
       try {
-        // Get current API key
+        // Get current API key (uses tracked index, matching Python DOA)
         const currentKey = this.getCurrentKey();
         if (!currentKey) {
-          // All keys exhausted
-          console.warn('[SerperClient] All API keys exhausted or rate-limited');
+          // All keys exhausted — graceful degradation
+          console.warn(`[SerperClient] All API keys exhausted or rate-limited for ${endpoint}`);
           return this.getGracefulDegradationResponse<T>(endpoint);
         }
         
@@ -205,14 +230,29 @@ export class SerperClient {
         // Check for blocking errors (trigger rotation without counting as retry)
         if (this.isBlockingError(response)) {
           const retryAfter = this.extractRetryAfter(response);
-          const newKey = this.rotateApiKey(retryAfter, {
+          const statusCode = response.status;
+          
+          // Rotate — marks the key that was ACTUALLY used (currentKey),
+          // not a re-queried LRU key
+          const nextKey = this.rotateApiKey(currentKey.keyId, retryAfter, {
             endpoint,
-            statusCode: response.status,
+            statusCode,
             params: body,
           });
           
-          if (!newKey) {
-            // All keys exhausted
+          if (!nextKey) {
+            // All keys exhausted.
+            // Auth/quota errors (400/401/402/403) → throw so the caller gets a
+            // clear diagnostic instead of silent empty data.
+            // Serper returns 400 "Not enough credits" instead of 402.
+            // Rate-limit (429) → graceful degradation is appropriate.
+            if ([400, 401, 402, 403].includes(statusCode)) {
+              throw new SerperAuthError(
+                `Serper API request failed (HTTP ${statusCode}) for all configured API keys. ` +
+                `This typically means your Serper account has no credits remaining or the API keys are invalid. ` +
+                `Top up credits at https://serper.dev or verify your SERPER_API_KEY values.`
+              );
+            }
             return this.getGracefulDegradationResponse<T>(endpoint);
           }
           
@@ -222,7 +262,7 @@ export class SerperClient {
         
         // Check for success
         if (response.ok) {
-          // Update key state
+          // Update key state on success
           this.updateKeyStateOnSuccess(currentKey.keyId);
           
           // Parse and return response
@@ -230,7 +270,7 @@ export class SerperClient {
           return data as T;
         }
         
-        // Other errors - retry with backoff
+        // Other errors (5xx etc.) — retry with backoff
         lastError = new Error(`HTTP ${response.status}: ${response.statusText}`);
         attempt++;
         
@@ -239,6 +279,11 @@ export class SerperClient {
         }
         
       } catch (error) {
+        // Re-raise auth errors immediately — don't swallow them in the retry loop
+        if (error instanceof SerperAuthError) {
+          throw error;
+        }
+        
         lastError = error instanceof Error ? error : new Error(String(error));
         attempt++;
         
@@ -249,8 +294,10 @@ export class SerperClient {
     }
     
     // All retries exhausted
-    console.error('[SerperClient] All retry attempts exhausted:', lastError);
-    return this.getGracefulDegradationResponse<T>(endpoint);
+    if (lastError) {
+      throw lastError;
+    }
+    throw new Error(`Serper API request failed after ${this.config.retryAttempts} attempts`);
   }
   
   /**
@@ -268,10 +315,21 @@ export class SerperClient {
   }
   
   /**
-   * Check if response indicates blocking error
+   * Check if response indicates a blocking error that should trigger key rotation.
+   *
+   * Blocking errors include:
+   * - 400 Bad Request: Serper returns this for "Not enough credits" (should be 402)
+   * - 401 Unauthorized: Invalid API key
+   * - 402 Payment Required: Quota exhausted
+   * - 403 Forbidden: API key blocked
+   * - 429 Too Many Requests: Rate limited
+   *
+   * All of these trigger rotation to the next available key. If all keys
+   * are exhausted, the client throws for auth/quota errors or returns
+   * graceful degradation for rate limits.
    */
   private isBlockingError(response: Response): boolean {
-    return [401, 403, 402, 429].includes(response.status);
+    return [400, 401, 402, 403, 429].includes(response.status);
   }
   
   /**
@@ -324,28 +382,39 @@ export class SerperClient {
   }
   
   /**
-   * Rotate to next available API key
+   * Rotate to next available API key.
+   *
+   * Marks the specified key (the one that just failed) as rate-limited,
+   * then selects the next available key using LRU strategy.
+   *
+   * Matches the Python DOA implementation which:
+   * 1. Uses `self.current_key_index` to identify the failing key
+   * 2. Marks it rate-limited
+   * 3. Updates `self.current_key_index` to the next available key
+   *
+   * @param failedKeyId - The keyId of the key that triggered the blocking error
+   * @param retryAfterSeconds - How long the key should be marked unavailable
+   * @param context - Request context for logging
+   * @returns Next available KeyState, or null if all keys exhausted
    */
   private rotateApiKey(
+    failedKeyId: string,
     retryAfterSeconds: number,
     context?: any
   ): KeyState | null {
-    // Mark current key as rate-limited
-    const currentKey = this.getCurrentKey();
-    if (currentKey) {
-      const state = this.keyStates.get(currentKey.keyId);
-      if (state) {
-        state.isRateLimited = true;
-        state.rateLimitExpiry = new Date(Date.now() + retryAfterSeconds * 1000);
-        
-        console.warn(
-          `[SerperClient] Key ${currentKey.keyId} rate-limited, expires at ${state.rateLimitExpiry.toISOString()}`,
-          context
-        );
-      }
+    // Mark the FAILED key as rate-limited (not a re-queried LRU key)
+    const failedState = this.keyStates.get(failedKeyId);
+    if (failedState) {
+      failedState.isRateLimited = true;
+      failedState.rateLimitExpiry = new Date(Date.now() + retryAfterSeconds * 1000);
+      
+      console.warn(
+        `[SerperClient] Key ${failedKeyId} rate-limited, expires at ${failedState.rateLimitExpiry.toISOString()}`,
+        context
+      );
     }
     
-    // Get available keys
+    // Get available keys (excludes the one we just marked)
     const availableKeyIds = this.getAvailableKeys();
     
     if (availableKeyIds.length === 0) {
@@ -353,12 +422,20 @@ export class SerperClient {
       return null;
     }
     
-    // Select LRU key
+    // Select LRU key and update tracked index (matching Python DOA)
     const nextKeyId = availableKeyIds[0];
     const nextKey = this.keyStates.get(nextKeyId);
     
     if (nextKey) {
-      console.log(`[SerperClient] Rotated to key ${nextKeyId}`);
+      // Update currentKeyIndex to match Python's self.current_key_index tracking
+      const idx = this.apiKeys.indexOf(nextKey.key);
+      if (idx !== -1) {
+        this.currentKeyIndex = idx;
+      }
+      
+      if (this.apiKeys.length > 1) {
+        console.log(`[SerperClient] Rotated to key ${nextKeyId}`);
+      }
       return nextKey;
     }
     

@@ -36,16 +36,19 @@ import type { EngineConfig } from '../config/index.js';
 // ============================================================================
 
 /**
- * System prompt for the Web Research Agent
+ * Get the system prompt for the Web Research Agent
  *
  * This prompt defines the agent's role, available tools, research strategy,
  * and output format requirements. It guides the agent to intelligently select
  * tools based on market characteristics and synthesize information from multiple
  * sources into a comprehensive research document.
  *
+ * Returns a fresh prompt each time with the current date/time embedded.
+ *
  * Requirements: 4.1-4.11, 5.1-5.13, 10.2, 10.4
  */
-const WEB_RESEARCH_AGENT_SYSTEM_PROMPT = `Current date and time: ${new Date().toISOString()}
+function getWebResearchAgentSystemPrompt(): string {
+  return `Current date and time: ${new Date().toISOString()}
 
 You are an autonomous web research analyst with the ability to search the web and extract webpage content.
 
@@ -125,12 +128,14 @@ Provide your analysis as a structured JSON signal with:
 
 CRITICAL OUTPUT RULES:
 1. YOU MUST OUTPUT ONLY VALID JSON - NO MARKDOWN, NO EXPLANATORY TEXT, NO CODE BLOCKS
-2. keyDrivers MUST be an array of SHORT strings (1-2 sentences each), NOT a full document
-3. riskFactors MUST be an array of SHORT strings describing specific limitations
-4. DO NOT use markdown formatting (no **, no ##, no tables) in keyDrivers or riskFactors arrays
-5. Put your comprehensive research document in metadata.researchSummary as a plain text string
-6. Each keyDriver should cite its source inline: "According to Reuters (URL), ..."
-7. Start your response with { and end with } - nothing else before or after
+2. DO NOT wrap your JSON in \`\`\`json or \`\`\` code blocks
+3. DO NOT add any text before the opening { or after the closing }
+4. keyDrivers MUST be an array of SHORT strings (1-2 sentences each), NOT a full document
+5. riskFactors MUST be an array of SHORT strings describing specific limitations
+6. DO NOT use markdown formatting (no **, no ##, no tables) in keyDrivers or riskFactors arrays
+7. Put your comprehensive research document in metadata.researchSummary as a plain text string
+8. Each keyDriver should cite its source inline: "According to Reuters (URL), ..."
+9. Your response must be parseable by JSON.parse() - test it mentally before outputting
 
 EXAMPLE OUTPUT FORMAT:
 {
@@ -156,9 +161,72 @@ EXAMPLE OUTPUT FORMAT:
   }
 }
 
-REMEMBER: Output ONLY the JSON object above. Do not add any text before or after the JSON. Do not wrap it in markdown code blocks. Just the raw JSON starting with { and ending with }.
+REMEMBER: Output ONLY the JSON object above. Your entire response should be valid JSON that starts with { and ends with }. Nothing before, nothing after, no markdown code blocks.
 
 Be thorough and document your research process.`;
+}
+
+// ============================================================================
+// Helper: Extract key findings from raw text (fallback)
+// ============================================================================
+
+/**
+ * Extract key findings from raw agent output text when JSON parsing fails.
+ *
+ * Mirrors the Python DOA implementation's fallback extraction logic:
+ * 1. Look for lines containing URLs, bullets, or numbered items
+ * 2. Fall back to sentence splitting
+ * 3. Last resort: truncate the raw output
+ *
+ * @param agentOutput - Raw text output from the agent
+ * @returns Array of extracted key driver strings
+ */
+function extractKeyDriversFromText(agentOutput: string): string[] {
+  const keyDrivers: string[] = [];
+  const lines = agentOutput.split('\n');
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    // Look for lines that seem like findings (contain URLs or start with bullets/numbers)
+    const hasUrl = line.includes('http');
+    const startsBullet = line.startsWith('-') || line.startsWith('*') || line.startsWith('•');
+    const startsNumbered = line.length > 2 && /^\d/.test(line[0]) && (line[1] === '.' || line[1] === ')');
+
+    if (hasUrl || startsBullet || startsNumbered) {
+      // Clean up markdown formatting
+      const cleanLine = line.replace(/^[-*•\d.)]+\s*/, '').trim();
+      if (cleanLine.length > 20) {
+        keyDrivers.push(cleanLine);
+        if (keyDrivers.length >= 5) break;
+      }
+    }
+  }
+
+  // If we didn't find structured findings, split into sentences
+  if (keyDrivers.length === 0) {
+    const sentences = agentOutput.split(/[.!?]+\s+/);
+    for (const s of sentences) {
+      const trimmed = s.trim();
+      if (trimmed.length > 20) {
+        keyDrivers.push(trimmed);
+        if (keyDrivers.length >= 3) break;
+      }
+    }
+  }
+
+  // If still empty, use truncated output as last resort
+  if (keyDrivers.length === 0) {
+    keyDrivers.push(
+      agentOutput.length > 500
+        ? agentOutput.substring(0, 500) + '...'
+        : agentOutput
+    );
+  }
+
+  return keyDrivers;
+}
 
 // ============================================================================
 // Agent Node Factory Function
@@ -292,27 +360,27 @@ export function createWebResearchAgentNode(
       ] as DynamicStructuredTool[];
 
       // Step 8: Create LLM instance (Requirement 4.2)
-      // Use Google as primary, with fallbacks to other providers
       const llm: LLMInstance = createLLMInstance(config, 'google', ['openai', 'anthropic']);
 
       // Step 9: Create ReAct agent with tools and system prompt (Requirement 4.1)
       const agent = createReactAgent({
         llm,
         tools,
-        messageModifier: WEB_RESEARCH_AGENT_SYSTEM_PROMPT,
+        messageModifier: getWebResearchAgentSystemPrompt(),
       });
 
       // Step 10: Prepare agent input with market data (Requirement 4.1)
+      const mbd = state.mbd;
       const agentInput = {
         messages: [
           {
             role: 'user',
             content: `Analyze this prediction market and gather comprehensive web research:
 
-Market Question: ${state.mbd.question}
-Resolution Criteria: ${state.mbd.resolutionCriteria || 'N/A'}
-Event Context: ${state.mbd.eventContext?.eventTitle || 'N/A'}
-Keywords: ${state.mbd.keywords?.join(', ') || 'N/A'}
+Market Question: ${mbd.question ?? 'N/A'}
+Market Description: ${mbd.resolutionCriteria ?? 'N/A'}
+Market Category: ${mbd.eventType ?? 'N/A'}
+Market Tags: ${mbd.keywords?.join(', ') ?? 'N/A'}
 
 Please search the web and scrape relevant sources to provide comprehensive context about this market.`,
           },
@@ -323,10 +391,8 @@ Please search the web and scrape relevant sources to provide comprehensive conte
       const maxToolCalls = config.webResearch?.maxToolCalls || 8;
       const timeout = config.webResearch?.timeout || 60000;
 
-      // Each ReAct cycle involves multiple internal graph steps:
-      //   system message → LLM reasoning → tool call → tool result → LLM reasoning
-      // So each tool call consumes ~5 recursion steps. Add headroom for the
-      // final synthesis step where the agent writes its JSON output.
+      // Set recursion limit high enough for ReAct agent reasoning cycles
+      // Each tool call can involve multiple reasoning steps (thought -> action -> observation)
       // Mirrors the Python DOA implementation: max_tool_calls * 5 + 20
       const recursionLimit = maxToolCalls * 5 + 20;
 
@@ -334,72 +400,106 @@ Please search the web and scrape relevant sources to provide comprehensive conte
         agent.invoke(agentInput, {
           recursionLimit,
         }),
-        new Promise((_, reject) =>
+        new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('Agent timeout')), timeout)
         ),
       ]);
 
       // Step 12: Extract final message
       const finalMessage = (agentResult as any).messages[(agentResult as any).messages.length - 1];
-      const agentOutput = finalMessage.content;
+      const agentOutput: string = finalMessage.content;
 
       // Step 13: Parse agent output as signal (Requirement 5.12)
-      let signal: AgentSignal | undefined;
+      let signalData: Record<string, any> | null = null;
 
       // Try direct JSON parse first
       try {
-        signal = JSON.parse(agentOutput);
+        signalData = JSON.parse(agentOutput);
       } catch {
-        // Not direct JSON, try extracting from markdown code blocks
+        // Not direct JSON — try extracting from markdown code blocks
       }
 
-      if (!signal) {
+      if (!signalData) {
         const codeBlockMatch = agentOutput.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
         if (codeBlockMatch) {
           try {
-            signal = JSON.parse(codeBlockMatch[1]);
+            signalData = JSON.parse(codeBlockMatch[1]);
           } catch {
             // Not valid JSON in code block
           }
         }
       }
 
-      if (!signal) {
-        // Try to find a JSON object anywhere in the text
-        const jsonMatch = agentOutput.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
+      if (!signalData) {
+        // Try to find JSON object with keyDrivers field as anchor
+        const keyDriversMatch = agentOutput.match(/\{[^{}]*"keyDrivers"[^{}]*\}/is);
+        if (keyDriversMatch) {
           try {
-            signal = JSON.parse(jsonMatch[0]);
+            signalData = JSON.parse(keyDriversMatch[0]);
           } catch {
             // Not valid JSON
           }
         }
       }
 
-      // If we still couldn't parse JSON, create fallback signal
-      if (!signal) {
-        console.warn(`[${agentName}] Failed to parse JSON output, using fallback`);
-        const truncatedOutput = agentOutput.length > 500
-          ? agentOutput.substring(0, 500) + '...'
-          : agentOutput;
+      if (!signalData) {
+        // Try broader JSON extraction
+        const jsonMatch = agentOutput.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            signalData = JSON.parse(jsonMatch[0]);
+          } catch {
+            // Not valid JSON
+          }
+        }
+      }
+
+      // Build the signal from parsed data or fallback
+      let signal: AgentSignal;
+
+      if (signalData) {
+        // Ensure required fields
+        if (!signalData.timestamp) {
+          signalData.timestamp = Date.now();
+        }
+        if (!signalData.agentName) {
+          signalData.agentName = agentName;
+        }
+
+        signal = {
+          agentName,
+          timestamp: signalData.timestamp,
+          confidence: signalData.confidence ?? 0.5,
+          direction: signalData.direction ?? 'NEUTRAL',
+          fairProbability: signalData.fairProbability ?? 0.5,
+          keyDrivers: signalData.keyDrivers ?? [],
+          riskFactors: signalData.riskFactors ?? [],
+          metadata: signalData.metadata ?? {},
+        };
+      } else {
+        // Fallback: Extract information from raw text
+        // Mirrors the Python DOA implementation's robust text extraction
+        console.warn(`[${agentName}] Failed to parse JSON output, extracting from raw text`);
+
+        const keyDrivers = extractKeyDriversFromText(agentOutput);
+
         signal = {
           agentName,
           timestamp: Date.now(),
           confidence: 0.5,
-          direction: 'NEUTRAL' as const,
+          direction: 'NEUTRAL',
           fairProbability: 0.5,
-          keyDrivers: [truncatedOutput],
-          riskFactors: [],
+          keyDrivers,
+          riskFactors: [
+            'Failed to parse structured output - information may be incomplete',
+          ],
           metadata: {
             parseError: true,
-            rawOutputLength: agentOutput.length,
+            researchSummaryLength: agentOutput.length,
+            researchSummary: agentOutput,
           },
         };
       }
-
-      // Ensure required fields
-      signal.agentName = agentName;
-      signal.timestamp = signal.timestamp || Date.now();
 
       // Step 14: Add tool usage metadata (Requirement 5.13)
       const toolUsage = getToolUsageSummary(toolAuditLog);
