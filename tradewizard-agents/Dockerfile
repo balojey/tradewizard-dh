@@ -1,13 +1,14 @@
 # Multi-stage build for TradeWizard Automated Market Monitor
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
-# Copy package files
+# Copy package files and postinstall patch script
 COPY package*.json ./
+COPY scripts/patch-langchain-aws.sh ./scripts/
 
 # Install all dependencies (including dev dependencies for build)
 RUN npm install --legacy-peer-deps
@@ -19,7 +20,7 @@ COPY . .
 RUN npm run build
 
 # Production stage
-FROM node:18-alpine
+FROM node:20-alpine
 
 # Install dumb-init for proper signal handling
 RUN apk add --no-cache dumb-init curl

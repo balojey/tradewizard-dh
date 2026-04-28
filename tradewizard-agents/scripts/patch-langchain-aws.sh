@@ -17,7 +17,9 @@ for ext in js cjs; do
       echo "[patch] $FILE already patched, skipping"
     else
       # Use node to apply the patch reliably across platforms
-      node -e "
+      # --input-type=commonjs is required because package.json has "type": "module"
+      # which would otherwise cause require() to fail in node -e
+      node --input-type=commonjs -e "
         const fs = require('fs');
         const file = '$FILE';
         let content = fs.readFileSync(file, 'utf8');
